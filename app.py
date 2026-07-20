@@ -142,7 +142,7 @@ def generate_exam(konu: str, soru_sayisi: int, zorluk: str) -> dict:
         raise RuntimeError("google-generativeai paketi kurulu değil. requirements.txt üzerinden kurulum yapın.")
 
     genai.configure(api_key=api_key)
-    model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+    model_name = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
     model = genai.GenerativeModel(model_name)
 
     prompt = f"""
@@ -165,7 +165,16 @@ def generate_exam(konu: str, soru_sayisi: int, zorluk: str) -> dict:
         temperature=0.4,
         response_mime_type="application/json",
     )
-    response = model.generate_content(prompt, generation_config=generation_config)
+    try:
+        response = model.generate_content(prompt, generation_config=generation_config)
+    except Exception as exc:
+        error_text = str(exc)
+        if "429" in error_text or "quota" in error_text.lower() or "ResourceExhausted" in error_text:
+            raise RuntimeError("Gemini API kotası dolu veya sınırlı. Bir süre bekleyip tekrar deneyin.") from exc
+        if "404" in error_text or "not found" in error_text.lower():
+            raise RuntimeError(f"Gemini model adı geçersiz: {model_name}. .env dosyasındaki GEMINI_MODEL değerini değiştirin.") from exc
+        raise RuntimeError(f"Gemini API çağrısı başarısız: {error_text}") from exc
+
     raw_text = getattr(response, "text", "") or ""
     if not raw_text:
         raise RuntimeError("Model boş çıktı döndürdü.")
