@@ -7,6 +7,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
+import requests
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -134,17 +135,7 @@ def normalize_exam_payload(payload: dict, soru_sayisi: int) -> dict:
     return normalized
 
 
-def generate_exam(konu: str, soru_sayisi: int, zorluk: str) -> dict:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY bulunamadı. Lütfen .env dosyasına ekleyin.")
-    if genai is None or types is None:
-        raise RuntimeError("google-generativeai paketi kurulu değil. requirements.txt üzerinden kurulum yapın.")
-
-    genai.configure(api_key=api_key)
-    model_name = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
-    model = genai.GenerativeModel(model_name)
-
+def generate_exam(konu: str, soru_sayisi: int, zorluk: str, provider: str) -> dict:
     prompt = f"""
     Konu: '{konu}'.
     Zorluk: '{zorluk}'.
@@ -160,6 +151,44 @@ def generate_exam(konu: str, soru_sayisi: int, zorluk: str) -> dict:
     {soru_sayisi} adet test sorusu üret. 5 adet klasik soru ekle.
     Çıktıyı yalnızca geçerli JSON olarak ver. Türkçe yaz.
     """
+
+    if provider == "groq":
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            raise ValueError("GROQ_API_KEY bulunamadı. Lütfen .env dosyasına ekleyin.")
+        model_name = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.4,
+        }
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=120)
+            response.raise_for_status()
+            data = response.json()
+            raw_text = data["choices"][0]["message"]["content"]
+        except Exception as exc:
+            error_text = str(exc)
+            if "401" in error_text or "invalid_api_key" in error_text.lower():
+                raise RuntimeError("Groq API anahtarı geçersiz veya kabul edilmedi. Anahtarınızı kontrol edin.") from exc
+            raise RuntimeError(f"Groq API çağrısı başarısız: {error_text}") from exc
+        payload_json = parse_json_response(raw_text)
+        return normalize_exam_payload(payload_json, soru_sayisi)
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY bulunamadı. Lütfen .env dosyasına ekleyin.")
+    if genai is None or types is None:
+        raise RuntimeError("google-generativeai paketi kurulu değil. requirements.txt üzerinden kurulum yapın.")
+
+    genai.configure(api_key=api_key)
+    model_name = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    model = genai.GenerativeModel(model_name)
 
     generation_config = types.GenerationConfig(
         temperature=0.4,
@@ -259,7 +288,7 @@ def render_history_panel() -> None:
 def main() -> None:
     init_db()
     st.title("AI Sınav Hazırlayıcı")
-    st.caption("Konu adı girin, soru sayısını seçin, zorluk seviyesini ayarlayın ve Gemini ile sınav hazırlayın.")
+    st.caption("Konu adı girin, soru sayısını seçin, zorluk seviyesini ayarlayın ve tercih ettiğiniz AI sağlayıcısıyla sınav hazırlayın.")
 
     render_history_panel()
 
@@ -267,6 +296,7 @@ def main() -> None:
         konu = st.text_input("Konu adı", placeholder="Örn. Python Döngüler")
         soru_sayisi = st.slider("Soru sayısı", min_value=3, max_value=15, value=5)
         zorluk = st.radio("Zorluk", ["Kolay", "Orta", "Zor"], horizontal=True)
+        provider = st.radio("AI Sağlayıcı", ["gemini", "groq"], horizontal=True, index=0)
         submitted = st.form_submit_button("Hazırla")
 
     if submitted:
@@ -275,13 +305,14 @@ def main() -> None:
             return
 
         try:
-            with st.spinner("Gemini modeli sınavı hazırlıyor..."):
-                exam = generate_exam(konu, soru_sayisi, zorluk)
+            provider_label = "Gemini" if provider == "gemini" else "Groq"
+            with st.spinner(f"{provider_label} modeli sınavı hazırlıyor..."):
+                exam = generate_exam(konu, soru_sayisi, zorluk, provider)
             save_exam(konu, soru_sayisi, zorluk, exam)
             render_exam(exam, konu, soru_sayisi, zorluk)
         except Exception as exc:  # pragma: no cover - runtime path
             st.error(f"Bir hata oluştu: {exc}")
-            st.info("API anahtarını .env dosyasına eklediğinizden emin olun. Örnek: GEMINI_API_KEY=your_key")
+            st.info("API anahtarını .env dosyasına eklediğinizden emin olun. Örnek: GEMINI_API_KEY=your_key veya GROQ_API_KEY=your_key")
 
 
 if __name__ == "__main__":
